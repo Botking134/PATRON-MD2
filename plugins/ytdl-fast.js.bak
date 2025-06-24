@@ -1,0 +1,194 @@
+const config = require('../config');
+const { cmd } = require('../command');
+const yts = require('yt-search');
+const fetch = require("node-fetch");
+
+// === VIDEO DOWNLOADER ===
+cmd({
+  pattern: "video",
+  alias: ["searchvideo", "ytdlvideo", " ytmp4", "mp4"],
+  desc: "Download YouTube video",
+  category: "main",
+  use: ".video2 <YouTube URL or search term>",
+  filename: __filename
+}, async (conn, mek, m, { from, q, reply }) => {
+  try {
+    await conn.sendMessage(from, {
+      react: { text: "🎥", key: m.key }
+    });
+
+    if (!q) return reply("❌ Please provide a YouTube URL or search term.");
+
+    let videoUrl = q;
+    let title = "";
+
+    if (!/^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//i.test(videoUrl)) {
+      const yt = await yts(q);
+      const video = yt.videos?.[0];
+      if (!video) return reply("❌ No results found.");
+      videoUrl = video.url;
+      title = video.title;
+    }
+
+    await reply("📥 Downloading video...");
+
+    const apiUrl = `https://flowfalcon.dpdns.org/download/ytmp4?url=${encodeURIComponent(videoUrl)}`;
+    const res = await fetch(apiUrl);
+    const data = await res.json();
+
+    if (!data.status || !data.result) {
+      return reply("❌ Failed to fetch video. Try again later.");
+    }
+
+    await conn.sendMessage(from, {
+      video: { url: data.result },
+      mimetype: "video/mp4",
+      caption: `🎬 ${title || "YouTube Video"}`
+    }, { quoted: mek });
+
+    await reply("✅ Video sent successfully!");
+
+  } catch (e) {
+    console.error("Error in .video2 command:", e);
+    reply("❌ An error occurred: " + e.message);
+  }
+});
+
+// === SPOTIFY DOWNLOADER ===
+cmd({
+  pattern: "spotify",
+  alias: ["sp"],
+  desc: "Download song from Spotify",
+  category: "main",
+  use: '.spotify <query>',
+  filename: __filename
+}, async (conn, mek, m, { from, sender, reply, q }) => {
+  await conn.sendMessage(m.key.remoteJid, {
+    react: {
+      text: "🎧",
+      key: m.key
+    }
+  });
+
+  try {
+    if (!q) return reply("Please provide a song name. Example: `.spotify robbery`");
+
+    const res = await fetch(`https://api.nekorinn.my.id/downloader/spotifyplay?q=${encodeURIComponent(q)}`);
+    const json = await res.json();
+
+    if (!json?.status || !json.result?.downloadUrl) return reply("❌ Could not download the song. Try again later.");
+
+    const song = json.result.metadata;
+    const audioUrl = json.result.downloadUrl;
+
+    await conn.sendMessage(from, {
+      image: { url: song.cover },
+      caption: `🎵 *Title:* ${song.title}\n👤 *Artist:* ${song.artist}\n⏱️ *Duration:* ${song.duration}\n🔗 *Link:* ${song.url}`
+    }, { quoted: mek });
+
+    await conn.sendMessage(from, {
+      audio: { url: audioUrl },
+      mimetype: "audio/mpeg",
+      fileName: `${song.title}.mp3`,
+      contextInfo: {
+        externalAdReply: {
+          title: song.title.length > 25 ? song.title.substring(0, 22) + "..." : song.title,
+          body: song.artist,
+          mediaType: 1,
+          thumbnailUrl: song.cover,
+          sourceUrl: song.url,
+          mediaUrl: song.url,
+          showAdAttribution: true,
+          renderLargerThumbnail: true
+        }
+      }
+    }, { quoted: mek });
+
+  } catch (err) {
+    console.error(err);
+    reply("🚫 An error occurred. Please try again.");
+  }
+});
+
+// === MP3 DOWNLOADER ===
+
+const axios = require("axios");
+const fs = require("fs");
+const { exec } = require("child_process");
+const path = require("path");
+const { tmpdir } = require("os");
+
+cmd({
+  pattern: "song",
+  alias: ["play", "mp3"],
+  desc: "Download YouTube song",
+  category: "main",
+  use: ".song <query or YouTube URL>",
+  filename: __filename
+}, async (conn, mek, m, { from, sender, reply, q }) => {
+  try {
+    if (!q) return reply("❌ Please provide a song name or YouTube link.");
+
+    await conn.sendMessage(from, {
+      react: { text: "🎶", key: m.key }
+    });
+
+    let videoURL = q.trim();
+    let title = "";
+
+    const isLink = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//i.test(videoURL);
+
+    if (!isLink) {
+      const search = await yts(q);
+      const videos = search.videos;
+      if (!videos?.length) return reply("❌ No results found!");
+      const video = videos[0];
+      videoURL = video.url;
+      title = video.title;
+      await reply("🔍 Found: " + title);
+    }
+
+    const api = `https://api.giftedtech.web.id/api/download/ytmp3?apikey=gifted&url=${encodeURIComponent(videoURL)}`;
+    const res = await fetch(api);
+    const json = await res.json();
+
+    if (json.status !== 200 || !json.success || !json.result?.download_url) {
+      return reply("❌ Failed to fetch audio. Try again later.");
+    }
+
+    const result = json.result;
+    title = title || result.title || 'audio';
+    const baseFileName = title.replace(/[^\w\s]/gi, '').substring(0, 32).trim();
+
+    const m4aPath = path.join(tmpdir(), `${baseFileName}.m4a`);
+    const mp3Path = path.join(tmpdir(), `${baseFileName}.mp3`);
+
+    // Download the .m4a file to disk
+    const audioRes = await axios.get(result.download_url, { responseType: "arraybuffer" });
+    fs.writeFileSync(m4aPath, Buffer.from(audioRes.data));
+
+    // Convert to mp3 using ffmpeg
+    await new Promise((resolve, reject) => {
+      exec(`ffmpeg -y -i "${m4aPath}" -vn -ab 128k -ar 44100 -f mp3 "${mp3Path}"`, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    // Read final mp3 file and send
+    const mp3Buffer = fs.readFileSync(mp3Path);
+    await conn.sendMessage(from, {
+      audio: mp3Buffer,
+      mimetype: "audio/mpeg",
+      fileName: `${baseFileName}.mp3`,
+      ptt: false
+    }, { quoted: mek });
+
+    // Clean up
+    fs.unlinkSync(m4aPath);
+    fs.unlinkSync(mp3Path);
+
+  } catch (err) {
+    return reply("❌ An error occurred. Please try again later.\nError: " + (err.message || err));
+  }
+});
